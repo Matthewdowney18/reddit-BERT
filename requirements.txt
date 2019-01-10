@@ -1,0 +1,5 @@
+torch 0.4.1
+pytorch_pretrained_bert
+tqdm
+numpy
+sklearn
