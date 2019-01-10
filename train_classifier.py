@@ -16,7 +16,7 @@ from classification.utils import variable, cuda, get_sentence_from_indices, \
 def main():
     file = {
         "model_group": "/baseline",
-        "model_name": "/classification",
+        "model_name": "/classification_1",
         "old_model_name": None,
         "model_version": 0,
         "project_file": "/home/mattd/PycharmProjects/reddit_BERT"
@@ -59,15 +59,15 @@ def main():
             "num_labels": 2,
             "gradient_accumulation_steps":1,
             "warmup_proportion":0.1
-
         }
 
     params["train"] = True
     params["val"] = True
-    params["num_training_examples"] = 78260
+    params["num_training_examples"] = -1
     params["num_val_examples"] = -1
-    params["nb_epochs"] = 1
-
+    params["nb_epochs"] = 2
+    params["num_outpout_checkpoints_train"] = 100
+    params["num_outpout_checkpoints_val"] = 1
     string= ""
     for k, v in file.items():
         string += "{}: {}\n".format(k, v)
@@ -77,44 +77,52 @@ def main():
     #print(string)
     output = string + '\n'
 
-    phases = ['train', 'val', ]
-    data_loaders = [dataloader_train, dataloader_val, ]
+    model = cuda(BertForNextSentencePrediction.from_pretrained(
+        params["bert_model"]))
+
+    phases = []
+    data_loaders = []
 
     #loads features from file that is created in make_features.py
-    #it takes a long time to greate features which is why there is a seperate
+    #it takes a long time to create features which is why there is a seperate
     #file
     file["features_path"] = "{}/features/max_{}/".format(
         file["project_file"], params["max_len"])
-    train_features=load_features("{}train.pkl".format(file["features_path"]))
-    val_features=load_features("{}val.pkl".format(file["features_path"]))
 
-    dataloader_train = make_dataloader(train_features, params["batch_size"])
-    dataloader_val = make_dataloader(val_features, params["batch_size"])
+    # get val examples
+    if params["val"]:
+        val_features = load_features("{}val.pkl".format(file["features_path"]))
+        dataloader_val = make_dataloader(val_features, params["batch_size"])
+        data_loaders.append(dataloader_val)
+        phases.append('val')
 
-    num_train_steps = int(
-        len(train_features) / params["batch_size"] /
-        params["gradient_accumulation_steps"] * params["nb_epochs"])
+    #get train features, and make optimizer
+    if params["train"]:
+        train_features = load_features("{}train.pkl".format(file["features_path"]))
+        dataloader_train = make_dataloader(train_features, params["batch_size"])
+        data_loaders.append(dataloader_train)
+        phases.append('train')
 
+        num_train_steps = int(
+            len(train_features) / params["batch_size"] /
+            params["gradient_accumulation_steps"] * params["nb_epochs"])
 
-    model = BertForNextSentencePrediction.from_pretrained(params["bert_model"])
+        # prepare_model
+        param_optimizer = list(model.named_parameters())
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in param_optimizer if
+                        not any(nd in n for nd in no_decay)],'weight_decay': 0.01},
+            {'params': [p for n, p in param_optimizer if
+                        any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
+        t_total = num_train_steps
 
-    model = cuda(model)
-
-    #prepare_model
-    param_optimizer = list(model.named_parameters())
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if
-                    not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if
-                    any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
-    t_total = num_train_steps
-
-    optimizer = BertAdam(optimizer_grouped_parameters,
-                         lr=params["learning_rate"],
-                         warmup=params["warmup_proportion"],
-                         t_total=t_total)
+        optimizer = BertAdam(optimizer_grouped_parameters,
+                             lr=params["learning_rate"],
+                             warmup=params["warmup_proportion"],
+                             t_total=t_total)
+    else:
+        optimizer = None
 
     if use_old_model:
         model, optimizer= load_checkpoint(
@@ -138,8 +146,6 @@ def main():
     outfile.write(output)
     outfile.close()
 
-
-    intervals = 10
     highest_acc = 0
 
     for epoch in range(0, params["nb_epochs"]):
@@ -153,13 +159,18 @@ def main():
         #    parameters = list(model.parameters())
         #    optimizer = torch.optim.Adam(
         #        parameters, amsgrad=True, weight_decay=weight_decay)
+        if epoch == params["nb_epochs"] -1 and params["val"]:
+            phases.append('val')
+            data_loaders.append(dataloader_val)
 
         for phase, data_loader in zip(phases, data_loaders):
             if phase == 'train':
                 model.train()
+                intervals = params["num_outpout_checkpoints_train"]
                 string = 'Train: \n'
             else:
                 model.eval()
+                intervals = params["num_outpout_checkpoints_val"]
                 string = 'Validation \n'
 
             print(string, end='')
@@ -173,8 +184,6 @@ def main():
             j = 1
 
             for i, batch in enumerate(tqdm(data_loader, desc="batch")):
-                optimizer.zero_grad()
-
                 batch = tuple(variable(t) for t in batch)
                 input_ids, input_mask, segment_ids, label_ids = batch
 
@@ -201,6 +210,8 @@ def main():
                         outfile.write(output)
                         outfile.close()
                         j += 1
+                    optimizer.zero_grad()
+
                 else:
                     # get result metrics
                     targets = label_ids.cpu().numpy()
@@ -224,11 +235,10 @@ def main():
                         average_epoch_precision = np.mean(epoch_precision)
                         average_epoch_recall = np.mean(epoch_recall)
                         average_epoch_f1 = np.mean(epoch_f1)
-                        string = 'accuracy:{} precision:{} recall:{} ' \
-                        'F1:{}'.format(
-                        average_epoch_accuracy,
-                            average_epoch_precision, average_epoch_recall,
-                            average_epoch_f1)
+                        string = "Accuracy: {:.3f}\nPrecision: {:.3f}\n" \
+                        "Recall: {:.3f}\nF1: {:.3f}\n".format(
+                            average_epoch_accuracy, average_epoch_precision,
+                            average_epoch_recall, average_epoch_f1)
                         output = output + string + '\n'
                         outfile = open(file["output_file"], 'w')
                         outfile.write(output)
