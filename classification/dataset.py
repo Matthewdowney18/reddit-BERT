@@ -8,6 +8,11 @@ from torch.utils.data import TensorDataset, RandomSampler, DataLoader
 import torch
 import random
 
+def reverse(label):
+    if label == '1':
+        return '0'
+    else:
+        return '1'
 
 def _read_file(filename, max_len):
     with open(filename, 'r', encoding='utf8') as f:
@@ -109,7 +114,7 @@ class RedditProcessor(DataProcessor):
             guid = "%s-%s" % (set_type, i)
             text_a = line[0]
             text_b = line[1]
-            label = line[2]
+            label = reverse(line[2])
             examples.append(
                 InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
