@@ -2,83 +2,86 @@ import numpy as np
 import torch
 import torch.utils.data
 import time
+import os
+import argparse
 from tqdm import tqdm
+import json
 
 from pytorch_pretrained_bert.modeling import BertForNextSentencePrediction
 from pytorch_pretrained_bert.optimization import BertAdam
 
 from classification.dataset import make_dataloader
-from classification.utils import variable, cuda, get_sentence_from_indices, \
-    save_checkpoint, load_checkpoint, \
-    classifier_accuracy, load_params, load_features
+from classification.utils import variable, cuda, classifier_accuracy, \
+     load_checkpoint, load_results, load_features, load_args, \
+     save_checkpoint
 
 
 def main():
-    file = {
-        "model_group": "/baseline",
-        "model_name": "/classification_1",
-        "old_model_name": None,
-        "model_version": 0,
-        "project_file": "/home/mattd/PycharmProjects/reddit_BERT"
-            "/classification"}
+    parser = argparse.ArgumentParser()
 
-    file["dataset_path"] = "{}/data/".format(file["project_file"])
+    #files arguments
+    parser.add_argument("-model_name", default="classifacation_2",
+                        help="Name of the model. To be used in filename")
+    parser.add_argument("-model_group", default="baseline/",
+                        help="dir to put model in")
+    parser.add_argument("-old_model_name", default=None,
+                        help="filename of model to be loaded")
+    parser.add_argument("-model version", default= 0,
+                        help="version to be added to the models filename")
+    parser.add_argument("-bert_model", default="bert-base-uncased",
+                        help="Bert pre-trained model")
+    parser.add_argument("-train", default=True,
+                        help="true if you want to train the model")
+    parser.add_argument("-val", default=True,
+                        help="true if you want to evaluate the model")
+    parser.add_argument("-train_batch_size", default=70,
+                        help="batch size for training dataset")
+    parser.add_argument("-val_batch_size", default=15,
+                        help="batch size for validation dataset")
+    parser.add_argument("-max_len", default=40,
+                        help="max length for input sequence")
+    parser.add_argument("-learning_rate", default=0.00005,
+                        help="learning weight for optimization")
+    parser.add_argument("-gradient_accumulation_steps", default=1,
+                        help="")
+    parser.add_argument("-num_eopchs", default=1,
+                        help="number of epochs for training, and validation")
+    parser.add_argument("-num_outpout_checkpoints_train", default=-1,
+                        help="determines how many times the loss is outputed "
+                        "during training")
+    parser.add_argument("-num_outpout_checkpoints_val", default=1,
+                        help="determines how many times metrics are outputed "
+                        "during training")
 
-    file["model_filename"] = '{}{}s{}_{}'.format(file["project_file"],
-        file["model_group"], file["model_name"], file["model_version"])
 
-    file["metrics_filename"] = '{}{}_metrics{}_{}'.format(file["project_file"],
-        file["model_group"], file["model_name"], file["model_version"])
+    args = parser.parse_args()
+    args.project_file = os.getcwd()
+    args.dataset_path = "{}/data/".format(args.project_file)
+    args.output_dir = '{}{}{}_{}/'.format(args.project_file,
+        args.model_group, args.model_name, args.model_version)
 
-    file["output_file"] = '{}{}_outputs{}_{}'.format(file["project_file"],
-        file["model_group"], file["model_name"], file["model_version"])
+
+    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train:
+        raise ValueError(
+            "Output directory ({}) already exists and is not empty.".format(args.output_dir))
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # check_files(file)
 
-    use_old_model = file["old_model_name"] is not None
-    params = {}
-
+    use_old_model = args.old_model_name is not None
     if use_old_model:
-        file["old_model_filename"] = '{}{}s{}'.format(file["project_file"],
-            file["model_group"], file["old_model_name"])
-        params, old_files = load_params(file["old_model_filename"])
-        use_old_model = old_files != {}
+        args.old_model_filename = '{}{}{}/args'.format(args.project_file,
+            args.model_group, args.old_model_name)
+        args = load_args(args.old_model_filename, args)
 
-    if not use_old_model:
-        params = {
-            "bert_model": "bert-base-uncased",
-            "batch_size": 70,
-            "hidden_size": 256,
-            "embedding_dim": 300,
-            "pretrained_embeddings": True,
-            "max_grad_norm": 5,
-            "max_len": 40,
-            "min_count": 2,
-            "weight_decay": 0.00001,
-            "learning_rate": 0.005,
-            "num_labels": 2,
-            "gradient_accumulation_steps":1,
-            "warmup_proportion":0.1
-        }
-
-    params["train"] = True
-    params["val"] = True
-    params["num_training_examples"] = -1
-    params["num_val_examples"] = -1
-    params["nb_epochs"] = 2
-    params["num_outpout_checkpoints_train"] = 100
-    params["num_outpout_checkpoints_val"] = 1
-    string= ""
-    for k, v in file.items():
+    string = ""
+    for k, v in vars(args):
         string += "{}: {}\n".format(k, v)
-    for k, v in params.items():
-        string += "{}: {}\n".format(k, v)
-
-    #print(string)
+    print(string)
     output = string + '\n'
 
     model = cuda(BertForNextSentencePrediction.from_pretrained(
-        params["bert_model"]))
+        args.bert_model))
 
     phases = []
     data_loaders = []
@@ -86,26 +89,28 @@ def main():
     #loads features from file that is created in make_features.py
     #it takes a long time to create features which is why there is a seperate
     #file
-    file["features_path"] = "{}/features/max_{}/".format(
-        file["project_file"], params["max_len"])
-
-    # get val examples
-    if params["val"]:
-        val_features = load_features("{}val.pkl".format(file["features_path"]))
-        dataloader_val = make_dataloader(val_features, params["batch_size"])
-        data_loaders.append(dataloader_val)
-        phases.append('val')
+    args.features_path = "{}/features/max_{}/".format(
+        args.project_file, args.max_len)
+    if not os.path.exists(args.features_dir):
+        raise ValueError(
+            "you must create features with classification/make_features.py "
+            "prior to running this model.\n need file: {}".format(
+            args.output_dir))
 
     #get train features, and make optimizer
-    if params["train"]:
-        train_features = load_features("{}train.pkl".format(file["features_path"]))
-        dataloader_train = make_dataloader(train_features, params["batch_size"])
+    if args.train:
+        train_features = load_features("{}train.pkl".format(args.features_path))
+        dataloader_train = make_dataloader(train_features, args.train_batch_size)
         data_loaders.append(dataloader_train)
         phases.append('train')
 
         num_train_steps = int(
-            len(train_features) / params["batch_size"] /
-            params["gradient_accumulation_steps"] * params["nb_epochs"])
+            len(train_features) / args.train_batch_size /
+            args.gradient_accumulation_steps * args.nb_epochs)
+
+        if args.num_outpout_checkpoints_train < 0:
+            args.num_outpout_checkpoints_train = num_train_steps / (
+                args.num_outpout_checkpoints_train * -1)
 
         # prepare_model
         param_optimizer = list(model.named_parameters())
@@ -118,37 +123,55 @@ def main():
         t_total = num_train_steps
 
         optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=params["learning_rate"],
-                             warmup=params["warmup_proportion"],
+                             lr=args.learning_rate,
+                             warmup=args.warmup_proportion,
                              t_total=t_total)
     else:
         optimizer = None
 
+    # get val examples
+    if args.val:
+        val_features = load_features("{}val.pkl".format(args.features_path))
+        dataloader_val = make_dataloader(val_features, args.val_batch_size)
+        data_loaders.append(dataloader_val)
+        phases.append('val')
+
     if use_old_model:
         model, optimizer= load_checkpoint(
-            file["old_model_filename"], model, optimizer)
+            args.old_model_filename, model, optimizer)
 
-    parameters = list(model.parameters())
+        #output results from last model
+        results = load_results(args.old_model_filename)
+        string = "\n--loaded model--\ntrain loss: {}\nval loss: {}\n" \
+            "num_epoch: {}\n".format(results[
+            "average_train_losses"][-1], results["val_loss"][-1],
+            results["epoch"])
+        output += string
+        print(string)
 
-    lowest_loss = 100
-    train_loss = []
-    val_loss = []
     best_model = model
     best_optimizer = optimizer
-    average_epoch_loss = 0
 
-    metrics = {"accuracy": [],
-               "precision": [],
-               "recall": [],
-               "f1": []}
+    metrics = { "accuracy": [],
+                "precision": [],
+                "recall": [],
+                "f1": [],
+                "lowest_loss" : 100,
+                "average_train_epoch_losses" : [],
+                "train_epoch_losses" : [],
+                "val_loss" : [],
+                "best_epoch": 0}
 
-    outfile = open(file["output_file"], 'w')
+    outfile = open("{}output".format(args.output_dir), 'w')
     outfile.write(output)
     outfile.close()
 
+    with open("{}args".format(args.output_dir), 'w') as fp:
+        json.dump(metrics, fp)
+
     highest_acc = 0
 
-    for epoch in range(0, params["nb_epochs"]):
+    for epoch in range(0, args.nb_epochs):
         start = time.clock()
         string = 'Epoch: {}\n'.format(epoch)
         print(string, end='')
@@ -159,19 +182,21 @@ def main():
         #    parameters = list(model.parameters())
         #    optimizer = torch.optim.Adam(
         #        parameters, amsgrad=True, weight_decay=weight_decay)
-        if epoch == params["nb_epochs"] -1 and params["val"]:
-            phases.append('val')
-            data_loaders.append(dataloader_val)
+
+        #use when you validate before training, and what to validate on last epoch
+        #if epoch == params["nb_epochs"] -1 and params["val"] and params["train"]:
+        #    phases.append('val')
+        #    data_loaders.append(dataloader_val)
 
         for phase, data_loader in zip(phases, data_loaders):
             if phase == 'train':
                 model.train()
-                intervals = params["num_outpout_checkpoints_train"]
-                string = 'Train: \n'
+                intervals = args.num_outpout_checkpoints_train
+                string = '--Train-- \n'
             else:
                 model.eval()
-                intervals = params["num_outpout_checkpoints_val"]
-                string = 'Validation \n'
+                intervals = args.num_outpout_checkpoints_val
+                string = '--Validation-- \n'
 
             print(string, end='')
             output = output + '\n' + string
@@ -206,7 +231,7 @@ def main():
                                 i, phase, average_epoch_loss))
                         #print(string, end='\n')
                         output = output + string + '\n'
-                        outfile = open(file["output_file"], 'w')
+                        outfile = open("{}output".format(args.output_dir), 'w')
                         outfile.write(output)
                         outfile.close()
                         j += 1
@@ -226,8 +251,7 @@ def main():
                     epoch_f1.append(f1)
                     if (len(data_loader) / intervals) * j <= i + 1:
                         # if len(data_loader) == i + 1:
-                        string = (
-                            'Example {:03d} | {} loss: {:.3f}'.format(
+                        string = ('Example {:03d} | {} loss: {:.3f}'.format(
                                 i, phase, average_epoch_loss))
                         # print(string, end='\n')
                         output = output + string + '\n'
@@ -240,7 +264,7 @@ def main():
                             average_epoch_accuracy, average_epoch_precision,
                             average_epoch_recall, average_epoch_f1)
                         output = output + string + '\n'
-                        outfile = open(file["output_file"], 'w')
+                        outfile = open("{}output".format(args.output_dir), 'w')
                         outfile.write(output)
                         outfile.close()
                         j += 1
@@ -249,11 +273,11 @@ def main():
             if phase == 'val':
                 time_taken = time.clock() - start
 
-                val_loss.append(average_epoch_loss)
+                metrics["val_loss"].append(average_epoch_loss)
                 string = ' {} loss: {:.3f} | time: {:.3f}'.format(
                     phase, average_epoch_loss, time_taken)
                 string += ' | lowest loss: {:.3f} highest accuracy:' \
-                    ' {:.3f}'.format(lowest_loss, highest_acc)
+                    ' {:.3f}'.format(metrics["lowest_loss"], highest_acc)
                 #print(string, end='\n')
                 output = output + '\n' + string + '\n'
 
@@ -266,33 +290,31 @@ def main():
                 metrics["recall"].append(average_epoch_recall)
                 metrics["f1"].append(average_epoch_f1)
 
-                string = "Accuracy: {:.3f}\nPrecision: {:.3f}\nRecall:" \
-                    " {:.3f}\nF1: {:.3f}\n".format(
-                        average_epoch_accuracy, average_epoch_precision,
-                        average_epoch_recall, average_epoch_f1)
-                #print(string, end='\n')
-                output = output + string + '\n'
-
-
-                if average_epoch_loss < lowest_loss:
+                if average_epoch_loss < metrics["lowest_loss"]:
                     best_model = model
                     best_optimizer = optimizer
-                    best_epoch = epoch
-                    lowest_loss = average_epoch_loss
+                    metrics["best_epoch"] = epoch
+                    metrics["lowest_loss"] = average_epoch_loss
 
-                save_checkpoint(
-                    best_epoch, best_model, best_optimizer,
-                    epoch, model, optimizer, train_loss, val_loss, metrics,
-                    params, file)
+                save_checkpoint("{}model".format(args.output_dir),
+                                best_model, best_optimizer,
+                                epoch, model, optimizer)
 
-                if average_epoch_accuracy > highest_acc:
-                    highest_acc = average_epoch_accuracy
+                with open("{}metrics".format(args.output_dir), 'w') as fp:
+                    json.dump(metrics, fp)
+
+                string = "Accuracy: {:.3f}\nPrecision: {:.3f}\nRecall:" \
+                         " {:.3f}\nF1: {:.3f}\n".format(
+                    average_epoch_accuracy, average_epoch_precision,
+                    average_epoch_recall, average_epoch_f1)
+                # print(string, end='\n')
+                output = output + string + '\n'
+
                 """
                 random_idx = np.random.randint(len(dataset_val))
                 sentence_1, sentence_2, labels = dataset_val[random_idx]
-                targets = labels
-                sentence_1_var = variable(sentence_1)
-                sentence_2_var = variable(sentence_2)
+                batch = tuple(variable(t) for t in batch)
+                input_ids, input_mask, segment_ids, label_ids = batch
 
                 outputs_var = model(sentence_1_var.unsqueeze(0),
                                     sentence_2_var.unsqueeze(0)) # unsqueeze
@@ -311,8 +333,10 @@ def main():
                 output = output + string + '\n' + '\n'
                 """
             else:
-                train_loss.append(average_epoch_loss)
-            outfile = open(file["output_file"], 'w')
+                metrics["average_train_epoch_losses"].append(average_epoch_loss)
+                metrics["train_epoch_losses"].append(epoch_loss)
+
+            outfile = open("{}output".format(args.output_dir), 'w')
             outfile.write(output)
             outfile.close()
 
