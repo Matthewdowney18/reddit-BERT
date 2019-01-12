@@ -22,11 +22,11 @@ def main():
     #files arguments
     parser.add_argument("-model_name", default="classifacation_2",
                         help="Name of the model. To be used in filename")
-    parser.add_argument("-model_group", default="baseline/",
+    parser.add_argument("-model_group", default="baseline",
                         help="dir to put model in")
     parser.add_argument("-old_model_name", default=None,
                         help="filename of model to be loaded")
-    parser.add_argument("-model version", default= 0,
+    parser.add_argument("-model_version", default= 0,
                         help="version to be added to the models filename")
     parser.add_argument("-bert_model", default="bert-base-uncased",
                         help="Bert pre-trained model")
@@ -34,51 +34,47 @@ def main():
                         help="true if you want to train the model")
     parser.add_argument("-val", default=True,
                         help="true if you want to evaluate the model")
-    parser.add_argument("-train_batch_size", default=70,
+    parser.add_argument("-train_batch_size", default=65,
                         help="batch size for training dataset")
-    parser.add_argument("-val_batch_size", default=15,
+    parser.add_argument("-val_batch_size", default=10,
                         help="batch size for validation dataset")
-    parser.add_argument("-max_len", default=40,
+    parser.add_argument("-max_len", default=60,
                         help="max length for input sequence")
     parser.add_argument("-learning_rate", default=0.00005,
                         help="learning weight for optimization")
     parser.add_argument("-gradient_accumulation_steps", default=1,
                         help="")
-    parser.add_argument("-num_eopchs", default=1,
+    parser.add_argument("-num_epochs", default=2,
                         help="number of epochs for training, and validation")
-    parser.add_argument("-num_outpout_checkpoints_train", default=-1,
+    parser.add_argument("-num_outpout_checkpoints_train", default=-2,
                         help="determines how many times the loss is outputed "
                         "during training")
     parser.add_argument("-num_outpout_checkpoints_val", default=1,
                         help="determines how many times metrics are outputed "
                         "during training")
+    parser.add_argument("-warmup_proportion", default=0.1,
+                        help="Proportion of training to perform linear learning"
+                        " rate warmup for.")
 
 
     args = parser.parse_args()
     args.project_file = os.getcwd()
     args.dataset_path = "{}/data/".format(args.project_file)
-    args.output_dir = '{}{}{}_{}/'.format(args.project_file,
+    args.output_dir = '{}/classification/{}/{}_{}/'.format(args.project_file,
         args.model_group, args.model_name, args.model_version)
 
-
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train:
-        raise ValueError(
-            "Output directory ({}) already exists and is not empty.".format(args.output_dir))
     os.makedirs(args.output_dir, exist_ok=True)
 
     # check_files(file)
 
     use_old_model = args.old_model_name is not None
     if use_old_model:
-        args.old_model_filename = '{}{}{}/args'.format(args.project_file,
+        args.old_model_filename = '{}/classification/{}/{}' \
+        '/'.format(args.project_file,
             args.model_group, args.old_model_name)
-        args = load_args(args.old_model_filename, args)
 
-    string = ""
-    for k, v in vars(args):
-        string += "{}: {}\n".format(k, v)
-    print(string)
-    output = string + '\n'
+
+        args = load_args("{}args.json".format(args.old_model_filename), args)
 
     model = cuda(BertForNextSentencePrediction.from_pretrained(
         args.bert_model))
@@ -89,13 +85,14 @@ def main():
     #loads features from file that is created in make_features.py
     #it takes a long time to create features which is why there is a seperate
     #file
-    args.features_path = "{}/features/max_{}/".format(
+    args.features_path = "{}/classification/features/max_{}/".format(
         args.project_file, args.max_len)
-    if not os.path.exists(args.features_dir):
+
+    if not os.path.exists(args.features_path):
         raise ValueError(
             "you must create features with classification/make_features.py "
             "prior to running this model.\n need file: {}".format(
-            args.output_dir))
+            args.features_path))
 
     #get train features, and make optimizer
     if args.train:
@@ -106,13 +103,12 @@ def main():
 
         num_train_steps = int(
             len(train_features) / args.train_batch_size /
-            args.gradient_accumulation_steps * args.nb_epochs)
+            args.gradient_accumulation_steps * args.num_epochs)
 
         if args.num_outpout_checkpoints_train < 0:
-            args.num_outpout_checkpoints_train = num_train_steps / (
-                args.num_outpout_checkpoints_train * -1)
+            args.num_outpout_checkpoints_train = len(train_features) /  \
+            args.train_batch_size  / (args.num_outpout_checkpoints_train * -1)
 
-        # prepare_model
         param_optimizer = list(model.named_parameters())
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
@@ -126,6 +122,8 @@ def main():
                              lr=args.learning_rate,
                              warmup=args.warmup_proportion,
                              t_total=t_total)
+
+        args.train_len=len(train_features)
     else:
         optimizer = None
 
@@ -136,46 +134,57 @@ def main():
         data_loaders.append(dataloader_val)
         phases.append('val')
 
+        args.val_len=len(val_features)
+
+    #outoput args
+    string = ""
+    for k, v in vars(args).items():
+        string += "{}: {}\n".format(k, v)
+    print(string)
+    output = string + '\n'
+
+    #load checkpoint
     if use_old_model:
         model, optimizer= load_checkpoint(
-            args.old_model_filename, model, optimizer)
+            "{}model".format(args.old_model_filename), model, optimizer)
 
         #output results from last model
-        results = load_results(args.old_model_filename)
+        results = load_results("{}metrics.json".format(args.old_model_filename))
         string = "\n--loaded model--\ntrain loss: {}\nval loss: {}\n" \
             "num_epoch: {}\n".format(results[
-            "average_train_losses"][-1], results["val_loss"][-1],
+            "average_train_epoch_losses"][-1], results["val_loss"][-1],
             results["epoch"])
         output += string
         print(string)
-
-    best_model = model
-    best_optimizer = optimizer
-
-    metrics = { "accuracy": [],
-                "precision": [],
-                "recall": [],
-                "f1": [],
-                "lowest_loss" : 100,
-                "average_train_epoch_losses" : [],
-                "train_epoch_losses" : [],
-                "val_loss" : [],
-                "best_epoch": 0}
 
     outfile = open("{}output".format(args.output_dir), 'w')
     outfile.write(output)
     outfile.close()
 
-    with open("{}args".format(args.output_dir), 'w') as fp:
-        json.dump(metrics, fp)
+    with open("{}args.json".format(args.output_dir), 'w') as fp:
+        json.dump(vars(args), fp, indent=4, sort_keys=True)
+
+    best_model = model
+    best_optimizer = optimizer
+
+    metrics = {"accuracy": [],
+               "precision": [],
+               "recall": [],
+               "f1": [],
+               "lowest_loss": 100,
+               "average_train_epoch_losses": [],
+               "train_epoch_losses": [],
+               "val_loss": [],
+               "best_epoch": 0}
 
     highest_acc = 0
 
-    for epoch in range(0, args.nb_epochs):
+    for epoch in range(0, args.num_epochs):
         start = time.clock()
         string = 'Epoch: {}\n'.format(epoch)
         print(string, end='')
         output = output + '\n' + string
+        metrics["epoch"] = epoch
 
         #if epoch == 6:
         #    model.unfreeze_embeddings()
@@ -300,8 +309,8 @@ def main():
                                 best_model, best_optimizer,
                                 epoch, model, optimizer)
 
-                with open("{}metrics".format(args.output_dir), 'w') as fp:
-                    json.dump(metrics, fp)
+                with open("{}metrics.json".format(args.output_dir), 'w') as fp:
+                    json.dump(metrics, fp, indent=4, sort_keys=True)
 
                 string = "Accuracy: {:.3f}\nPrecision: {:.3f}\nRecall:" \
                          " {:.3f}\nF1: {:.3f}\n".format(
